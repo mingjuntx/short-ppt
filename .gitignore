@@ -1,5 +1,6 @@
 runtime.json
 fonts.local.json
+vision.local.json
 .venv/
 venv/
 .local-runtime/
@@ -14,6 +15,11 @@ __pycache__/
 inputs/
 outputs/
 out/
+focus.json
+detected-focus.json
+chapters.json
+recognized.json
+recognized.txt
 *.mp4
 *.mov
 *.mkv
@@ -25,6 +31,7 @@ out/
 *.pt
 *.pth
 *.onnx
+*.task
 *.ttf
 *.otf
 *.ttc

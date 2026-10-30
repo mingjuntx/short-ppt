@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "coordinate_space": "source-frame",
+  "events": [
+    {
+      "start": 2.0,
+      "end": 4.8,
+      "x": 0.7,
+      "y": 0.45,
+      "zoom": 1.35,
+      "ramp": 0.45,
+      "reason": "示例：在已复核的重点位置平滑放大，再恢复全景"
+    }
+  ]
+}

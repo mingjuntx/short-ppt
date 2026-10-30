@@ -1,4 +1,4 @@
 interface:
-  display_name: "黑渐变视频与封面"
-  short_description: "自动提炼顶部关键词节点，生成中文字幕、黑渐变正片和粗宋体封面"
-  default_prompt: "使用 $video-gradient-editorial，自动根据这段视频的话题提炼顶部节点标题，下方显示字幕，生成黑渐变正片和粗宋体封面，不加署名。"
+  display_name: "Short PPT"
+  short_description: "像做PPT一样把短视频讲清楚：关键词节点、字幕、封面与可靠指向放大"
+  default_prompt: "使用 $short-ppt，把这段视频像PPT一样讲清楚：自动提炼顶部关键词、生成中文字幕和粗宋体封面，在可靠识别到指向时平滑放大，不加署名。"

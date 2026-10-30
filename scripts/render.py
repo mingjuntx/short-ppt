@@ -148,6 +148,34 @@ def video_duration(binary, source):
     return int(h) * 3600 + int(m) * 60 + float(s)
 
 
+def video_frame_rate(binary, source):
+    result = subprocess.run([binary, '-hide_banner', '-i', str(source)], capture_output=True)
+    info = result.stderr.decode('utf-8', errors='replace')
+    video = next((line for line in info.splitlines() if 'Stream #' in line and 'Video:' in line), '')
+    match = re.search(r'([\d.]+) fps', video)
+    if not match or float(match.group(1)) <= 0:
+        raise RuntimeError('无法读取源视频帧率，未猜测放大关键帧的时间。')
+    return float(match.group(1))
+
+
+def focus_in_output_frame(events, source_size, output_size):
+    sw, sh = source_size
+    w, h = output_size
+    scale = max(w/sw, h/sh)
+    scaled_w, scaled_h = sw*scale, sh*scale
+    mapped = []
+    for item in events:
+        x = (item['x']*scaled_w-(scaled_w-w)/2)/w
+        y = (item['y']*scaled_h-(scaled_h-h)/2)/h
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            raise ValueError('指向目标不在所选裁切画幅内，请保留原比例或重新审核放大计划。')
+        event = dict(item, x=x, y=y)
+        if abs(x-item['x'])+abs(y-item['y']) > 1e-9:
+            event['input_coordinates'] = {'x':item['x'],'y':item['y']}
+        mapped.append(event)
+    return mapped
+
+
 def ellipse_path(cx, cy, rx, ry):
     k = .55228475
     return (f'm {cx-rx:.1f} {cy:.1f} '
@@ -264,11 +292,18 @@ def main():
     p.add_argument('--chapter-title', help='片头左上角的章节标题')
     p.add_argument('--chapter-subtitle', default='')
     p.add_argument('--chapters', help='根据转录语义提炼的顶部关键词节点 JSON 时间表')
+    p.add_argument('--focus', help='已经复核的指向放大关键帧 JSON')
+    p.add_argument('--auto-focus', action='store_true', help='本机检测手指/鼠标指向后自动生成平滑放大')
+    p.add_argument('--hand-model', help='可选的本地 MediaPipe 手部模型；也可用 vision.local.json')
     args = p.parse_args()
     if args.auto_subtitles and (args.srt or args.cover_only):
         p.error('--auto-subtitles 不能与 --srt 或 --cover-only 同时使用。')
     if args.chapters and (args.chapter_title or args.chapter_subtitle or args.cover_only):
         p.error('--chapters 不能与单个片头标题参数或 --cover-only 同时使用。')
+    if args.focus and args.auto_focus:
+        p.error('--focus 与 --auto-focus 互斥。')
+    if args.cover_only and (args.focus or args.auto_focus):
+        p.error('指向放大只作用于视频，不与 --cover-only 同时使用。')
     source = Path(args.input).resolve()
     out = Path(args.output_dir).resolve()
     if not source.is_file():
@@ -303,6 +338,10 @@ def main():
         targets += ['recognized.srt', 'recognized.txt', 'recognized.json', 'subtitles.srt']
     if args.chapters:
         targets.append('chapters.json')
+    if args.focus or args.auto_focus:
+        targets.append('focus.json')
+    if args.auto_focus:
+        targets.append('detected-focus.json')
     if any((out / name).exists() for name in targets):
         p.error('输出目录已有同名成品，请使用新的目录。')
     ff = ffmpeg_path()
@@ -311,6 +350,31 @@ def main():
     if args.chapters:
         from chapters import load_chapters
         chapter_schedule = load_chapters(args.chapters, duration=video_duration(ff, source))
+    focus_schedule = []
+    focus_input_schedule = []
+    focus_analysis = {}
+    focus_fps = None
+    focus_requested = bool(args.focus or args.auto_focus)
+    if args.auto_focus:
+        from transcribe import runtime_config
+        import sys
+        worker = SKILL_ROOT / 'scripts' / 'detect_focus.py'
+        python = runtime_config().get('python', sys.executable)
+        detected = out / 'detected-focus.json'
+        task = [python, str(worker), '--input', str(source), '--output', str(detected)]
+        if args.hand_model:
+            task += ['--hand-model', args.hand_model]
+        subprocess.run(task, check=True)
+        args.focus = str(detected)
+    if args.focus:
+        from focus import load_focus
+        focus_schedule = load_focus(args.focus, duration=video_duration(ff, source))
+        focus_input_schedule = [dict(event) for event in focus_schedule]
+        raw_focus = json.loads(Path(args.focus).read_text(encoding='utf-8-sig'))
+        if isinstance(raw_focus, dict):
+            focus_analysis = raw_focus.get('analysis', {})
+        if focus_schedule:
+            focus_fps = video_frame_rate(ff, source)
     if args.auto_subtitles:
         from transcribe import runtime_config
         import sys
@@ -344,10 +408,18 @@ def main():
             width = min(1080, ow) // 2 * 2
             ratio = ow / oh if style['aspect'] == 'original' else {'3:4': .75, '9:16': .5625}[style['aspect']]
             height = round(width / ratio / 2) * 2
+            focus_filter = ''
+            frame_rate_filter = ''
+            if focus_schedule:
+                from focus import ffmpeg_focus_filter
+                focus_schedule = focus_in_output_frame(focus_schedule, (ow,oh), (width,height))
+                # Normalize before scale: scale can discard the final frame duration.
+                frame_rate_filter = f'fps={focus_fps},'
+                focus_filter = ffmpeg_focus_filter(focus_schedule,width,height,fps=focus_fps) + ','
             gradient((width, height), style['gradient_start'], style['gradient_end'],
                      style['gradient_opacity'], style['gradient_direction']).save(tmp / 'gradient.png')
-            graph = (f'[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,'
-                     f"eq=contrast={style['contrast']}:brightness={style['brightness']}:saturation={style['saturation']}[base];"
+            graph = (f'[0:v]{frame_rate_filter}scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,'
+                     + focus_filter + f"eq=contrast={style['contrast']}:brightness={style['brightness']}:saturation={style['saturation']}[base];"
                      '[base][1:v]overlay=0:0:format=auto[masked];')
             inputs = [ff, '-hide_banner', '-loglevel', 'error', '-i', str(source), '-i', str(tmp / 'gradient.png')]
             if args.chapter_title:
@@ -381,7 +453,9 @@ def main():
             else:
                 graph += 'null'
             graph += '[v]'
-            run(inputs + ['-filter_complex_threads', '2', '-filter_complex', graph, '-map', '[v]',
+            graph_path = tmp / 'filter.ffscript'
+            graph_path.write_text(graph, encoding='utf-8')
+            run(inputs + ['-filter_complex_threads', '2', '-filter_complex_script', str(graph_path), '-map', '[v]',
                  '-map', '0:a?', '-c:v', 'libx264', '-crf', '19', '-preset', 'medium',
                  '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
                  str(out / 'video.mp4')], cwd=tmp)
@@ -389,6 +463,11 @@ def main():
             shutil.copyfile(args.srt, out / 'subtitles.srt')
         if args.chapters:
             (out / 'chapters.json').write_text(json.dumps({'version':1, 'chapters':chapter_schedule}, ensure_ascii=False, indent=2), encoding='utf-8')
+        if focus_requested:
+            # Keep source coordinates reusable for another aspect ratio/render.
+            (out / 'focus.json').write_text(json.dumps({'version':1,'events':focus_input_schedule,'analysis':focus_analysis,
+                'coordinate_space':'source-frame','rendered_events':focus_schedule,
+                'normalized_fps':focus_fps},ensure_ascii=False,indent=2),encoding='utf-8')
         (out / 'style.json').write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps({'output': str(out), 'files': targets}, ensure_ascii=False))
 
