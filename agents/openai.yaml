@@ -1,4 +1,4 @@
 interface:
   display_name: "Short PPT"
-  short_description: "像做PPT一样把短视频讲清楚：关键词节点、字幕、封面与可靠指向放大"
+  short_description: "像做PPT一样把视频讲清楚：关键词、字幕、封面与桌面指挥家重点放大"
   default_prompt: "使用 $short-ppt，把这段视频像PPT一样讲清楚：自动提炼顶部关键词、生成中文字幕和粗宋体封面，在可靠识别到指向时平滑放大，不加署名。"

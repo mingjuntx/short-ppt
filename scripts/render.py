@@ -170,6 +170,8 @@ def focus_in_output_frame(events, source_size, output_size):
         if not (0 <= x <= 1 and 0 <= y <= 1):
             raise ValueError('指向目标不在所选裁切画幅内，请保留原比例或重新审核放大计划。')
         event = dict(item, x=x, y=y)
+        if 'keyframes' in item:
+            event['keyframes'] = focus_in_output_frame(item['keyframes'], source_size, output_size)
         if abs(x-item['x'])+abs(y-item['y']) > 1e-9:
             event['input_coordinates'] = {'x':item['x'],'y':item['y']}
         mapped.append(event)

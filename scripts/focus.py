@@ -53,6 +53,21 @@ def validate_focus(data, duration=None):
             raise ValueError(f'事件 {index} 的 ramp 必须大于零。')
         event.update(start=start, end=end, x=x, y=y, zoom=zoom,
                      ramp=min(ramp, (end-start)/2))
+        if 'keyframes' in event:
+            points = event['keyframes']
+            if not isinstance(points, list) or len(points) < 2:
+                raise ValueError('连续轨迹至少需要两个关键帧。')
+            normalized = []
+            for point in points:
+                if not isinstance(point, dict):
+                    raise ValueError('轨迹关键帧必须是对象。')
+                point = {k:_number(point.get(k), 'keyframe '+k) for k in ('t','x','y')}
+                if not start <= point['t'] <= end or not 0 <= point['x'] <= 1 or not 0 <= point['y'] <= 1:
+                    raise ValueError('轨迹时间或坐标超出事件范围。')
+                if normalized and point['t'] <= normalized[-1]['t']:
+                    raise ValueError('轨迹关键帧时间必须严格递增。')
+                normalized.append(point)
+            event['keyframes'] = normalized
         result.append(event)
     result.sort(key=lambda event: event['start'])
     for previous, event in zip(result, result[1:]):
@@ -77,8 +92,9 @@ def focus_state(events, t):
         if event['start'] <= t <= event['end']:
             weight = _weight(event, t)
             zoom = 1 + (event['zoom']-1)*weight
-            x = .5 + (event['x']-.5)*weight
-            y = .5 + (event['y']-.5)*weight
+            target = target_state(event, t)
+            x = .5 + (target['x']-.5)*weight
+            y = .5 + (target['y']-.5)*weight
             # Keep the crop fully inside the original image.
             half = .5/zoom
             return {'zoom': zoom, 'x': min(1-half, max(half, x)),
@@ -88,6 +104,32 @@ def focus_state(events, t):
 
 def _fmt(value):
     return format(value, '.9g')
+
+
+def target_state(event, t):
+    points = event.get('keyframes')
+    if not points:
+        return {'x':event['x'], 'y':event['y']}
+    if t <= points[0]['t']:
+        return points[0]
+    for a, b in zip(points, points[1:]):
+        if t < b['t']:
+            u = (t-a['t'])/(b['t']-a['t'])
+            u = u*u*(3-2*u)
+            return {key:a[key]+(b[key]-a[key])*u for key in ('x','y')}
+    return points[-1]
+
+
+def _target_expression(event, axis, clock):
+    points = event.get('keyframes')
+    if not points:
+        return _fmt(event[axis])
+    result = _fmt(points[-1][axis])
+    for a, b in reversed(list(zip(points, points[1:]))):
+        u = f'max(0,min(1,({clock}-{_fmt(a["t"])})/{_fmt(b["t"]-a["t"])}))'
+        smooth = f'({u}*{u}*(3-2*{u}))'
+        result = f'if(lt({clock},{_fmt(b["t"])}),{_fmt(a[axis])}+({_fmt(b[axis]-a[axis])})*{smooth},{result})'
+    return result
 
 
 def _envelope(event, clock='t'):
@@ -126,8 +168,8 @@ def ffmpeg_focus_filter(events, width, height, fps=30):
     for event in events:
         envelope = _envelope(event, clock)
         zoom_terms.append(f'({_fmt(event["zoom"]-1)}*{envelope})')
-        x_terms.append(f'({_fmt(event["x"]-.5)}*{envelope})')
-        y_terms.append(f'({_fmt(event["y"]-.5)}*{envelope})')
+        x_terms.append(f'(({_target_expression(event,"x",clock)}-.5)*{envelope})')
+        y_terms.append(f'(({_target_expression(event,"y",clock)}-.5)*{envelope})')
     z = '1+' + '+'.join(zoom_terms)
     x = '.5+' + '+'.join(x_terms)
     y = '.5+' + '+'.join(y_terms)

@@ -18,6 +18,25 @@ def event(**overrides):
 
 
 class FocusPlanTests(unittest.TestCase):
+    def test_continuous_path_validation_and_interpolation(self):
+        from focus import target_state
+        points=[dict(t=1.5,x=.4,y=.4),dict(t=2.5,x=.6,y=.6)]
+        e=validate_focus([event(keyframes=points)])[0]
+        self.assertAlmostEqual(target_state(e,2)['x'],.5)
+        self.assertEqual(target_state(e,0),points[0])
+        self.assertEqual(target_state(e,4),points[-1])
+        self.assertAlmostEqual(focus_state([e],2)['x'],.5)
+        for bad in [[points[0]],list(reversed(points)),[points[0],dict(t=4,x=.5,y=.5)],
+                    [points[0],dict(t=2,x=float('nan'),y=.5)]]:
+            with self.assertRaises(ValueError):
+                validate_focus([event(keyframes=bad)])
+
+    def test_continuous_path_maps_with_aspect_crop(self):
+        from render import focus_in_output_frame
+        mapped=focus_in_output_frame([event(keyframes=[dict(t=1,x=.4,y=.5),dict(t=2,x=.6,y=.5)])],(400,200),(200,200))
+        self.assertAlmostEqual(mapped[0]['keyframes'][0]['x'],.3)
+        self.assertAlmostEqual(mapped[0]['keyframes'][1]['x'],.7)
+
     def test_empty_events_are_a_noop(self):
         self.assertEqual(validate_focus({'version':1,'events':[]}), [])
         self.assertEqual(ffmpeg_focus_filter([], 320,180), 'null')
@@ -146,7 +165,8 @@ class FFmpegFocusTests(unittest.TestCase):
                 return result
             run(['-loop','1','-framerate','30','-i',str(temp/'base.png'),'-f','lavfi','-i','sine=frequency=440:sample_rate=48000',
                  '-t','4','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac',str(temp/'in.mp4')])
-            events=validate_focus([event(start=0,end=.8,x=0,y=0,zoom=1.8,ramp=.2),event()])
+            events=validate_focus([event(start=0,end=.8,x=0,y=0,zoom=1.8,ramp=.2),
+                event(keyframes=[dict(t=1.5,x=.65,y=.5),dict(t=2,x=.65,y=.5),dict(t=2.5,x=.6,y=.5)])])
             run(['-i',str(temp/'in.mp4'),'-vf',ffmpeg_focus_filter(events,320,180),
                  '-c:v','libx264','-pix_fmt','yuv420p','-c:a','copy',str(temp/'out.mp4')])
             result=subprocess.run([ff,'-hide_banner','-i',str(temp/'out.mp4'),'-f','null','-'],capture_output=True)
@@ -164,6 +184,9 @@ class FFmpegFocusTests(unittest.TestCase):
             middle=Image.open(temp/'middle.png').convert('RGB')
             self.assertEqual(middle.size,(320,180))
             self.assertGreater(min(middle.getpixel((160,90))),220)
+            run(['-ss','2.5','-i',str(temp/'out.mp4'),'-frames:v','1',str(temp/'moving.png')])
+            moving=Image.open(temp/'moving.png').convert('RGB')
+            self.assertGreater(min(moving.getpixel((186,90))),220)
             # Outside the event the same source marker returns to x=208.
             run(['-ss','3.5','-i',str(temp/'out.mp4'),'-frames:v','1',str(temp/'after.png')])
             after=Image.open(temp/'after.png').convert('RGB')
