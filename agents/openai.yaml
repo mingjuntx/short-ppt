@@ -1,0 +1,4 @@
+interface:
+  display_name: "黑渐变视频与封面"
+  short_description: "自动识别中文字幕，为拍摄视频添加黑色渐变和白色宋体封面"
+  default_prompt: "使用 $video-gradient-editorial，把这段视频做成参考图的黑渐变风格，生成正片和封面，暂时不加署名。"
