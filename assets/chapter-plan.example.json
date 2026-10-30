@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "chapters": [
+    {"start":0.35,"end":12,"title":"项目介绍","subtitle":"先讲清楚要解决什么","evidence":{"cue_start":1,"cue_end":4}},
+    {"start":12,"end":24,"title":"关键功能","subtitle":"用实际画面展示用法","evidence":{"cue_start":5,"cue_end":8}},
+    {"start":24,"end":36,"title":"实测结果","subtitle":"总结优点与待改进处","evidence":{"cue_start":9,"cue_end":12}}
+  ]
+}

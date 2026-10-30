@@ -112,17 +112,19 @@ def ass_time(seconds):
     return f'{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}'
 
 
-def chapter_overlay(size, title, subtitle, style):
+def chapter_overlay(size, title, subtitle, style, label='01'):
     w, h = size
     image = Image.new('RGBA', size)
     text = Image.new('RGBA', size)
     draw = ImageDraw.Draw(text)
     x, y = round(w * .09), round(h * .14)
     regular = style['subtitle_font_file']
-    rows = [('01', regular, round(w * .047), y),
-            (title, style['chapter_font_file'], round(w * .095), y + round(w * .073))]
+    title_lines = title.splitlines()
+    rows = [(label, regular, round(w * .047), y)]
+    for i, line in enumerate(title_lines):
+        rows.append((line, style['chapter_font_file'], round(w * .095), y + round(w * (.073 + i * .115))))
     if subtitle:
-        rows.append((subtitle, regular, round(w * .044), y + round(w * .205)))
+        rows.append((subtitle, regular, round(w * .044), y + round(w * (.205 + (len(title_lines)-1) * .115))))
     for words, font_file, fs, top in rows:
         font = load_font(font_file, fs)
         while font.getlength(words) > .82 * w and fs > 12:
@@ -136,6 +138,16 @@ def chapter_overlay(size, title, subtitle, style):
     return image
 
 
+def video_duration(binary, source):
+    result = subprocess.run([binary, '-hide_banner', '-i', str(source)], capture_output=True)
+    info = result.stderr.decode('utf-8', errors='replace')
+    match = re.search(r'Duration: (\d+):(\d+):([\d.]+)', info)
+    if not match:
+        raise RuntimeError('无法读取视频时长，未生成顶部节点时间轴。')
+    h, m, s = match.groups()
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
 def ellipse_path(cx, cy, rx, ry):
     k = .55228475
     return (f'm {cx-rx:.1f} {cy:.1f} '
@@ -145,7 +157,38 @@ def ellipse_path(cx, cy, rx, ry):
             f'b {cx-k*rx:.1f} {cy+ry:.1f} {cx-rx:.1f} {cy+k*ry:.1f} {cx-rx:.1f} {cy:.1f}')
 
 
+def caption_lines(text, font, max_width, tokenizer):
+    # ASR's character-count line breaks are not semantic word boundaries.
+    fragments = [s.strip() for s in text.splitlines() if s.strip()]
+    flat = ''
+    for fragment in fragments:
+        if flat and flat[-1].isascii() and flat[-1].isalnum() and fragment[0].isascii() and fragment[0].isalnum():
+            flat += ' '
+        flat += fragment
+    if not flat:
+        raise ValueError('字幕条目没有可显示的文字。')
+    if font.getlength(flat) <= max_width:
+        return [flat]
+    boundaries = [end for _, _, end in tokenizer.tokenize(flat, HMM=False)]
+    candidates = []
+    for end in boundaries:
+        left, right = flat[:end].strip(), flat[end:].strip()
+        if not left or not right or right[0] in '，。！？；：、,.!?;:':
+            continue
+        a, b = font.getlength(left), font.getlength(right)
+        candidates.append((max(0,a-max_width)+max(0,b-max_width), abs(a-b), left, right))
+    if not candidates:
+        return [flat]
+    _, _, left, right = min(candidates)
+    return [left, right]
+
+
 def make_ass(source, dest, width, height, style):
+    import jieba
+    import logging
+    jieba.setLogLevel(logging.ERROR)
+    tokenizer = jieba.Tokenizer()
+    tokenizer.tmp_dir = str(dest.parent)
     text = Path(source).read_text(encoding='utf-8-sig').replace('\r\n', '\n')
     pattern = r'(\d+:\d+:\d+[,.]\d+)\s*-->\s*(\d+:\d+:\d+[,.]\d+)[^\n]*\n(.*?)(?=\n\s*\n|\Z)'
     cues = re.findall(pattern, text, flags=re.S)
@@ -180,12 +223,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         words = re.sub(r'<[^>]+>', '', words).strip()
         # Never interpret SRT content as ASS override instructions.
         words = words.replace('\\', '／').replace('{', '（').replace('}', '）')
-        lines = words.splitlines()
         cue_size = fs
         font = load_font(style['subtitle_font_file'], cue_size)
+        lines = caption_lines(words, font, width - side * 2, tokenizer)
         while max(font.getlength(line) for line in lines) > width - side * 2 and cue_size > fs * .88:
             cue_size -= 1
             font = load_font(style['subtitle_font_file'], cue_size)
+            lines = caption_lines(words, font, width - side * 2, tokenizer)
+        if max(font.getlength(line) for line in lines) > width - side * 2:
+            raise ValueError('字幕过长，无法在两行内安全显示，请重新分段。')
         # Soft oval behind the words, separate from the top-to-bottom mask.
         max_line = min(width - side * 2, max(font.getlength(line) for line in lines))
         ry = cue_size * (.72 + .62 * (len(lines) - 1))
@@ -195,7 +241,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         halo = (f'{{\\an7\\pos(0,0)\\p1\\bord0\\shad0\\blur{width*.022:.1f}'
                 f'\\1c&H000000&\\1a&H{alpha:02X}&\\fad(50,70)}}{shape}')
         events.append(f'Dialogue: 0,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{halo}')
-        words = words.replace('\n', r'\N')
+        words = r'\N'.join(lines)
         events.append(f'Dialogue: 1,{ass_time(a)},{ass_time(b)},Default,,0,0,0,,{{\\fs{round(cue_size*ass_scale)}\\blur0.2\\fad(50,70)}}{words}')
     dest.write_text(header + '\n'.join(events) + '\n', encoding='utf-8-sig')
 
@@ -217,9 +263,12 @@ def main():
     p.add_argument('--cover-only', action='store_true')
     p.add_argument('--chapter-title', help='片头左上角的章节标题')
     p.add_argument('--chapter-subtitle', default='')
+    p.add_argument('--chapters', help='根据转录语义提炼的顶部关键词节点 JSON 时间表')
     args = p.parse_args()
     if args.auto_subtitles and (args.srt or args.cover_only):
         p.error('--auto-subtitles 不能与 --srt 或 --cover-only 同时使用。')
+    if args.chapters and (args.chapter_title or args.chapter_subtitle or args.cover_only):
+        p.error('--chapters 不能与单个片头标题参数或 --cover-only 同时使用。')
     source = Path(args.input).resolve()
     out = Path(args.output_dir).resolve()
     if not source.is_file():
@@ -242,9 +291,9 @@ def main():
         p.error('无效的宽高比。')
     if not Path(style['font']).is_file():
         p.error('请先运行 scripts/configure_fonts.py 配置本机字体，或通过 --font 指定封面宋体文件。')
-    if (args.srt or args.auto_subtitles or args.chapter_title) and not Path(style['subtitle_font_file']).is_file():
+    if (args.srt or args.auto_subtitles or args.chapter_title or args.chapters) and not Path(style['subtitle_font_file']).is_file():
         p.error('字幕字体文件不存在，请在样式配置中指定 subtitle_font_file。')
-    if args.chapter_title and not Path(style['chapter_font_file']).is_file():
+    if (args.chapter_title or args.chapters) and not Path(style['chapter_font_file']).is_file():
         p.error('章节标题字体文件不存在，请在样式配置中指定 chapter_font_file。')
     out.mkdir(parents=True, exist_ok=True)
     targets = ['cover.jpg', 'style.json'] + ([] if args.cover_only else ['video.mp4'])
@@ -252,10 +301,16 @@ def main():
         targets.append('subtitles.srt')
     if args.auto_subtitles:
         targets += ['recognized.srt', 'recognized.txt', 'recognized.json', 'subtitles.srt']
+    if args.chapters:
+        targets.append('chapters.json')
     if any((out / name).exists() for name in targets):
         p.error('输出目录已有同名成品，请使用新的目录。')
     ff = ffmpeg_path()
     check_ffmpeg(ff, subtitles=bool(args.srt or args.auto_subtitles))
+    chapter_schedule = []
+    if args.chapters:
+        from chapters import load_chapters
+        chapter_schedule = load_chapters(args.chapters, duration=video_duration(ff, source))
     if args.auto_subtitles:
         from transcribe import runtime_config
         import sys
@@ -296,13 +351,26 @@ def main():
                      '[base][1:v]overlay=0:0:format=auto[masked];')
             inputs = [ff, '-hide_banner', '-loglevel', 'error', '-i', str(source), '-i', str(tmp / 'gradient.png')]
             if args.chapter_title:
-                chapter_overlay((width, height), args.chapter_title, args.chapter_subtitle, style).save(tmp / 'chapter.png')
-                inputs += ['-loop', '1', '-framerate', '30', '-i', str(tmp / 'chapter.png')]
-                graph += ('[2:v]format=rgba,fade=t=in:st=0.35:d=0.25:alpha=1,fade=t=out:st=7.2:d=0.35:alpha=1[chapter];'
-                          "[masked][chapter]overlay=0:0:format=auto:shortest=1:enable='between(t,0.35,7.55)'[headed];")
-                current = 'headed'
-            else:
-                current = 'masked'
+                duration = video_duration(ff, source)
+                chapter_schedule = [dict(start=min(.35, duration*.1), end=min(7.55, duration),
+                                         title=args.chapter_title, subtitle=args.chapter_subtitle, label='01')]
+            current = 'masked'
+            for i, chapter in enumerate(chapter_schedule):
+                picture = chapter_overlay((width, height), chapter['title'], chapter.get('subtitle', ''), style,
+                                          label=chapter.get('label', f'{i+1:02d}'))
+                bbox = picture.getbbox()
+                # Keep only the header area to avoid decoding a full-frame PNG for every node.
+                if bbox:
+                    picture = picture.crop((0, 0, width, min(height, bbox[3]+8)))
+                filename = tmp / f'chapter-{i}.png'
+                picture.save(filename)
+                inputs += ['-loop', '1', '-framerate', '30', '-i', str(filename)]
+                a, b = chapter['start'], chapter['end']
+                fade = min(.22, (b-a)/4)
+                graph += (f'[{i+2}:v]format=rgba,fade=t=in:st={a:.6f}:d={fade:.6f}:alpha=1,'
+                          f'fade=t=out:st={b-fade:.6f}:d={fade:.6f}:alpha=1[chapter{i}];'
+                          f"[{current}][chapter{i}]overlay=0:0:format=auto:shortest=1:enable='gte(t,{a:.6f})*lt(t,{b:.6f})'[headed{i}];")
+                current = f'headed{i}'
             graph += f'[{current}]'
             if args.srt:
                 make_ass(args.srt, tmp / 'subtitles.ass', width, height, style)
@@ -313,12 +381,14 @@ def main():
             else:
                 graph += 'null'
             graph += '[v]'
-            run(inputs + ['-filter_complex', graph, '-map', '[v]',
+            run(inputs + ['-filter_complex_threads', '2', '-filter_complex', graph, '-map', '[v]',
                  '-map', '0:a?', '-c:v', 'libx264', '-crf', '19', '-preset', 'medium',
                  '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
                  str(out / 'video.mp4')], cwd=tmp)
         if args.srt:
             shutil.copyfile(args.srt, out / 'subtitles.srt')
+        if args.chapters:
+            (out / 'chapters.json').write_text(json.dumps({'version':1, 'chapters':chapter_schedule}, ensure_ascii=False, indent=2), encoding='utf-8')
         (out / 'style.json').write_text(json.dumps(style, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps({'output': str(out), 'files': targets}, ensure_ascii=False))
 

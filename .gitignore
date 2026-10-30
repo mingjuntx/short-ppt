@@ -29,6 +29,8 @@ out/
 *.otf
 *.ttc
 *.zip
+assets/reference.jpg
+assets/video-reference-*.png
 .DS_Store
 Thumbs.db
 .idea/
